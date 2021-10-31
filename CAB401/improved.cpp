@@ -3,8 +3,16 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <fstream>
+#include <omp.h>
 
 int number_bacteria;
+int number_comparisons;
+int number_threads;
+
+int* counts;
+double** total_values;
+long** total_indices;
 char** bacteria_name;
 long M, M1, M2;
 short code[27] = { 0, 2, 1, 2, 3, 4, 5, 6, 7, -1, 8, 9, 10, 11, -1, 12, 13, 14, 15, 16, 1, 17, 18, 5, 19, 3 };
@@ -12,6 +20,7 @@ short code[27] = { 0, 2, 1, 2, 3, 4, 5, 6, 7, -1, 8, 9, 10, 11, -1, 12, 13, 14, 
 #define LEN				6
 #define AA_NUMBER		20
 #define	EPSILON			1e-010
+#define NUMBER_THREADS	8
 
 void Init()
 {
@@ -94,7 +103,7 @@ public:
 		{
 			if (ch == '>')
 			{
-				while (fgetc(bacteria_file) != '\n'); // skip rest of line
+				while (fgetc(bacteria_file) != '\n'); //skip rest of line
 
 				char buffer[LEN - 1];
 				fread(buffer, sizeof(char), LEN - 1, bacteria_file);
@@ -103,6 +112,8 @@ public:
 			else if (ch != '\n')
 				cont_buffer(ch);
 		}
+
+		fclose(bacteria_file);
 
 		long total_plus_complement = total + complement;
 		double total_div_2 = total * 0.5;
@@ -116,49 +127,37 @@ public:
 			one_l_div_total[i] = (double)one_l[i] / total_l;
 
 		double* second_div_total = new double[M1];
+		
+		#pragma omp parallel for num_threads(NUMBER_THREADS)
 		for (int i = 0; i < M1; i++)
 			second_div_total[i] = (double)second[i] / total_plus_complement;
 
-		count = 0;
 		double* t = new double[M];
+		int counter = 0;
 
+		#pragma omp parallel for num_threads(NUMBER_THREADS) reduction(+:counter)
 		for (long i = 0; i < M; i++)
 		{
-			double p1 = second_div_total[i_div_aa_number];
-			double p2 = one_l_div_total[i_mod_aa_number];
-			double p3 = second_div_total[i_mod_M1];
-			double p4 = one_l_div_total[i_div_M1];
+			double p1 = second_div_total[i / AA_NUMBER];
+			double p2 = one_l_div_total[i % AA_NUMBER];
+			double p3 = second_div_total[i % M1];
+			double p4 = one_l_div_total[i / M1];
 			double stochastic = (p1 * p2 + p3 * p4) * total_div_2;
-
-			if (i_mod_aa_number == AA_NUMBER - 1)
-			{
-				i_mod_aa_number = 0;
-				i_div_aa_number++;
-			}
-			else
-				i_mod_aa_number++;
-
-			if (i_mod_M1 == M1 - 1)
-			{
-				i_mod_M1 = 0;
-				i_div_M1++;
-			}
-			else
-				i_mod_M1++;
-
+			
 			if (stochastic > EPSILON)
 			{
 				t[i] = (vector[i] - stochastic) / stochastic;
-				count++;
+				counter++;
 			}
 			else
 				t[i] = 0;
 		}
 
-		delete second_div_total;
-		delete vector;
-		delete second;
-
+		delete[] second_div_total;
+		delete[] vector;
+		delete[] second;
+		
+		count = counter;
 		tv = new double[count];
 		ti = new long[count];
 
@@ -172,9 +171,8 @@ public:
 				pos++;
 			}
 		}
-		delete t;
 
-		fclose(bacteria_file);
+		delete[] t;
 	}
 };
 
@@ -190,6 +188,7 @@ void ReadInputFile(const char* input_name)
 	}
 
 	fscanf_s(input_file, "%d", &number_bacteria);
+	number_comparisons = (number_bacteria * (number_bacteria - 1)) / 2;
 	bacteria_name = new char* [number_bacteria];
 
 	for (long i = 0; i < number_bacteria; i++)
@@ -255,17 +254,46 @@ void CompareAllBacteria()
 	Bacteria** b = new Bacteria * [number_bacteria];
 	for (int i = 0; i < number_bacteria; i++)
 	{
-		printf("load %d of %d\n", i + 1, number_bacteria);
+		//printf("load %d of %d\n", i + 1, number_bacteria);
 		b[i] = new Bacteria(bacteria_name[i]);
 	}
 
+	int* first_bacterias = new int[number_comparisons];
+	int* second_bacterias = new int[number_comparisons];
+	double* correlations = new double[number_comparisons];
+	
+	int counter = 0;
 	for (int i = 0; i < number_bacteria - 1; i++)
 		for (int j = i + 1; j < number_bacteria; j++)
 		{
-			printf("%2d %2d -> ", i, j);
-			double correlation = CompareBacteria(b[i], b[j]);
-			printf("%.20lf\n", correlation);
+			first_bacterias[counter] = i;
+			second_bacterias[counter] = j;
+			counter++;
 		}
+
+	#pragma omp parallel for num_threads(NUMBER_THREADS) schedule(dynamic, 1)
+	for (int i = 0; i < number_comparisons; i++)
+	{
+		//printf("%2d %2d -> ", i, j);
+		double correlation = CompareBacteria(b[first_bacterias[i]], b[second_bacterias[i]]);
+		//printf("%.20lf\n", correlation);
+		correlations[i] = correlation;
+	}
+
+	std::ofstream bacteria_results;
+	char number_bacteria_string[4];
+	sprintf_s(number_bacteria_string, "%d", number_bacteria);
+	char filename[32] = "parallel_results_";
+	strcat_s(filename, number_bacteria_string);
+	strcat_s(filename, ".txt");
+	bacteria_results.open(filename);
+	for (int i = 0; i < number_comparisons; i++)
+	{
+		bacteria_results << first_bacterias[i] << " ";
+		bacteria_results << second_bacterias[i] << " -> ";
+		bacteria_results << correlations[i] << "\n";
+	}
+	bacteria_results.close();
 }
 
 int main(int argc, char* argv[])
@@ -273,7 +301,7 @@ int main(int argc, char* argv[])
 	time_t t1 = time(NULL);
 
 	Init();
-	ReadInputFile("list.txt");
+	ReadInputFile("list5.txt");
 	CompareAllBacteria();
 
 	time_t t2 = time(NULL);
